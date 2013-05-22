@@ -1,4 +1,4 @@
-%%% Erlami Application.
+%%% Main erlami_helpers module.
 %%%
 %%% Copyright 2013 Anton Evzhakov <anber@anber.ru>
 %%%
@@ -13,22 +13,18 @@
 %%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %%% See the License for the specific language governing permissions and
 %%% limitations under the License.
--module(erlami_app).
+-module(erlami_helpers).
+
 -author("Anton Evzhakov <anber@anber.ru>").
 -license("Apache License 2.0").
 
--behaviour(application).
+-include("erlami.hrl").
 
-%% Application callbacks
--export([start/2, stop/1]).
+-export( [
+    trim/1
+]).
 
-%% ===================================================================
-%% Application callbacks
-%% ===================================================================
-
-start(_StartType, _StartArgs) ->
-    {ok, ServerAddresses} = application:get_env(listen),
-    erlami_sup:start_link(ServerAddresses).
-
-stop(_State) ->
-    ok.
+trim(Data) when is_binary(Data) ->
+    DataSize = byte_size(Data) - 2,
+    <<Trimed:DataSize/binary, "\r\n">> = Data,
+    Trimed.

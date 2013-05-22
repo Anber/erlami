@@ -17,43 +17,79 @@
 -author("Anton Evzhakov <anber@anber.ru>").
 -license("Apache License 2.0").
 
--behaviour(supervisor).
-
 -include_lib("kernel/include/inet.hrl").
+-include_lib("erlami.hrl").
 
 %% API
 -export([start_link/2]).
 
-%% Supervisor callbacks
--export([init/1]).
-
-%% Helper macro for declaring children of supervisor
--define(
-    CHILD(Name, Args),
-    {Name,
-        {erlami_client_worker, start_link, Args},
-        permanent, 5000, worker, [?MODULE]
-    }
-).
+%% callbacks
+-export([init/2]).
 
 %% ===================================================================
 %% API functions
 %% ===================================================================
 start_link(Name, ServerInfo) ->
-    supervisor:start_link({local, Name}, ?MODULE, ServerInfo).
+    {ok, spawn_link(?MODULE, init, [Name, ServerInfo])}.
 
-%% ===================================================================
-%% Supervisor callbacks
-%% ===================================================================
-init(ServerInfo) ->
+auth(Socket, User, Password) ->
+    gen_tcp:send(Socket, "Action: login\n"),
+    gen_tcp:send(Socket, io_lib:format("Username: ~s\n", [User])),
+    gen_tcp:send(Socket, io_lib:format("Secret: ~s\n", [Password])),
+    gen_tcp:send(Socket, "\n"),
+    case erlami:get_response() of
+        Response when is_record(Response, ami_response), Response#ami_response.success == true ->
+            ok;
+        Response when is_record(Response, ami_response) ->
+            io:format("Error: ~p\n", [Response#ami_response.message]), 
+            fail
+    end.
+
+init(Name, ServerInfo) ->
     {host, Host} = lists:keyfind(host, 1, ServerInfo),
     {port, Port} = lists:keyfind(port, 1, ServerInfo),
     {user, User} = lists:keyfind(user, 1, ServerInfo),
     {password, Password} = lists:keyfind(password, 1, ServerInfo),
-    {logfile, Logfile} = lists:keyfind(logfile, 1, ServerInfo),
+    % {logfile, Logfile} = lists:keyfind(logfile, 1, ServerInfo),
 
-    {ok, Socket} = gen_tcp:connect(Host, Port, [http]),
+    {ok, Socket} = gen_tcp:connect(Host, Port, [binary, {packet, line}]),
 
+    AuthResult = receive
+        { tcp, Socket, <<"Asterisk Call Manager/1.4\r\n">> } ->
+            auth(Socket, User, Password);
+        Msg ->
+            io:format("Unexpected message: ~p\n", [Msg]),
+            fail
+    end,
+    case AuthResult of
+        ok ->
+            register(ami, self()), 
+            event_loop(dict:new());
+        _ -> fail
+    end.
+
+event_loop(Handlers) ->
+    NHandlers = receive
+        { tcp, _Socket, <<"Event: ", Name/binary>> } ->
+            EventName = binary_to_atom(erlami_helpers:trim(Name), utf8),
+            Event = erlami:parse_event(#ami_event{ name = EventName }),
+            case dict:is_key(EventName, Handlers) of
+                true ->
+                    lists:foreach(fun (F) -> F(Event) end, dict:fetch(EventName, Handlers));
+                false -> nop
+            end,
+            Handlers;
+        { handler, add, EventName, F } ->
+            L = case dict:is_key(EventName, Handlers) of
+                true -> dict:fetch(EventName, Handlers);
+                false -> []
+            end,
+            dict:store(EventName, [F | L], Handlers);
+        Msg ->
+            io:format("Unexpected message: ~p\n", [Msg]),
+            Handlers
+    end,
+    event_loop(NHandlers).
 
     % {ok, #hostent{h_addr_list=Addresses}} = resolve_host(Host),
     % Log = erlagi_log:get_logger(Logfile),
@@ -75,5 +111,3 @@ init(ServerInfo) ->
     %     )),
     %     ?CHILD(WorkerName, [Socket, Log, Callback])
     % end),
-    Children = [],
-    {ok, { {one_for_one, 5, 10}, Children} }.
