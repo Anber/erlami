@@ -29,7 +29,7 @@
 -define(
     CHILD(Name, Args),
     {Name,
-        {erlami_client, start_link, Args},
+        {Name, start_link, Args},
         permanent, infinity, worker, [?MODULE]
     }
 ).
@@ -37,21 +37,13 @@
 %% ===================================================================
 %% API functions
 %% ===================================================================
-start_link(ServerAddresses) ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, ServerAddresses).
+start_link(ServerInfo) ->
+    supervisor:start_link({local, ?MODULE}, ?MODULE, ServerInfo).
 
 %% ===================================================================
 %% Supervisor callbacks
 %% ===================================================================
-init(ServerAddresses) ->
-    Children = lists:map(
-        fun({ServerName, ServerInfo}) ->
-            WorkerName = list_to_atom(string:concat(
-                "ami-client-sup-", atom_to_list(ServerName)
-            )),
-            ?CHILD(WorkerName, [WorkerName, ServerInfo])
-        end,
-        ServerAddresses
-    ),
+init(ServerInfo) ->
+    Children = [?CHILD(erlami, [ServerInfo])],
     {ok, { {one_for_one, 5, 10}, Children} }.
 

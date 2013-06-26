@@ -20,40 +20,86 @@
 
 -include("erlami.hrl").
 
+-export([init/1, start_link/1]).
+
 -export( [
-    get_response/0, parse_event/1
+    request/1, request/2, add_handler/2
 ]).
 
-parse_response(Response) when is_record(Response, ami_response)  ->
+-record(state, {handlers = dict:new(), responses = dict:new()}).
+
+start_link(ServerInfo) ->
+    {ok, spawn_link(?MODULE, init, [ServerInfo])}.
+
+init(ServerInfo) ->
+    AmiPID = self(),
+    register(ami, AmiPID),
+    {ok, _ClientPID} = erlami_client:start_link(ServerInfo, AmiPID),
     receive
-        { tcp, _Socket, <<"Message: ", Message/binary>> } ->
-            parse_response(Response#ami_response{ message = erlami_helpers:trim(Message) });
-        { tcp, _Socket, <<"\r\n">> } ->
-            Response;
-        Msg ->
-            #ami_response{ success = false, message = io_lib:format("Unexpected message ~p", [Msg]) }
+        {connected, Socket} ->
+            loop(#state{}, Socket);
+        _ -> fail
     end.
 
-parse_event(Event) when is_record(Event, ami_event)  ->
-    receive
-        { tcp, _Socket, <<"Privilege: ", Privileges/binary>> } ->
-            parse_event(Event#ami_event{ privilege = binary:split(erlami_helpers:trim(Privileges), <<",">>) });
-        { tcp, _Socket, <<"\r\n">> } ->
-            Event;
-        { tcp, _Socket, Msg } when is_binary(Msg) ->
-            [Key, Value] = binary:split(erlami_helpers:trim(Msg), <<": ">>),
-            parse_event(Event#ami_event{ data = [{Key, Value} | Event#ami_event.data] });
+loop(State, Socket) ->
+    NewState = receive
+        Event = #ami_event{name = EventName} when is_record(Event, ami_event) ->
+            State#state{
+                handlers = case dict:is_key(EventName, State#state.handlers) of
+                    true ->
+                        Fns = dict:fetch(EventName, State#state.handlers),
+                        Actualed = lists:filter(
+                            fun (F) ->
+                                case F(Event) of
+                                    continue -> true;
+                                    _ -> false
+                                end
+                            end,
+                            Fns
+                        ),
+                        dict:store(EventName, Actualed, State#state.handlers);
+                    false -> State#state.handlers
+                end
+            };
+        Response = #ami_response{uuid = ActionID} when is_record(Response, ami_response) ->
+            State#state{
+                responses = case dict:is_key(ActionID, State#state.responses) of
+                    true ->
+                        Pid = dict:fetch(ActionID, State#state.responses),
+                        Pid ! Response,
+                        dict:erase(ActionID, State#state.responses);
+                    false ->
+                        lager:error(<<"Ответ на неизвестный запрос: ~p~n~p">>, [Response, dict:to_list(State#state.responses) ]),
+                        State#state.responses
+                end
+            };
+        { handler, add, EventName, F } ->
+            State#state{
+                handlers = dict:append(EventName, F, State#state.handlers)
+            };
+        { request, Req, PidToResponse } when is_record(Req, ami_request) ->
+            #ami_request{action = Action, data = Data} = Req,
+            ActionID = erlami_client:request(Socket, Action, Data),
+            State#state{responses = dict:store(ActionID, PidToResponse, State#state.responses)};
         Msg ->
-            io:format("Unexpected message: ~p\n", [Msg]),
-            fail
-    end.
+            lager:error(<<"Unexpected message: ~p~n">>, [Msg]),
+            State
+    end,
+    loop(NewState, Socket).
 
 %% External API
 
-get_response() ->
+request(Request) when is_record(Request, ami_request) ->
+    ami ! {request, Request, self()},
     receive
-        { tcp, _Socket, <<"Response: ", "Success", "\r\n">> } ->
-            parse_response(#ami_response{ success = true });
-        Msg ->
-            #ami_response{ success = false, message = io_lib:format("Unexpected message ~p", [Msg]) }
+        Response when is_record(Response, ami_response) -> Response
     end.
+
+request(Action, Data) ->
+    request(#ami_request{action = Action, data = Data}).
+
+%% @spec add_handler(EventName, Callback) -> ok
+%% @doc …
+add_handler(EventName, Callback) when is_atom(EventName), is_function(Callback, 1) ->
+    ami ! { handler, add, EventName, fun(Event) -> Callback(Event#ami_event.data) end },
+    ok.
