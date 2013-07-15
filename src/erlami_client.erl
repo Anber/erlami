@@ -106,7 +106,7 @@ init(ServerInfo, AmiPID) ->
     {ok, Socket} = gen_tcp:connect(Host, Port, [binary, {packet, line}]),
 
     receive
-        { tcp, Socket, <<"Asterisk Call Manager/1.4\r\n">> } ->
+        { tcp, Socket, <<"Asterisk Call Manager/", _Version:3/binary, "\r\n">> } ->
             AmiPID ! {connected, Socket},
             auth(Socket, User, Password),
             event_loop(Socket, AmiPID);
