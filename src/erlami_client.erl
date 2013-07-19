@@ -59,6 +59,8 @@ parse_event(Event) when is_record(Event, ami_event)  ->
     receive
         { tcp, _Socket, <<"Privilege: ", Privileges/binary>> } ->
             parse_event(Event#ami_event{ privilege = binary:split(erlami_helpers:trim(Privileges), <<",">>) });
+        { tcp, _Socket, <<"ActionID: ", ActionID/binary>> } ->
+            parse_event(Event#ami_event{ action_id = binary_to_list(erlami_helpers:trim(ActionID)) });
         { tcp, _Socket, <<"\r\n">> } ->
             Event;
         { tcp, _Socket, Msg } when is_binary(Msg) ->
@@ -73,13 +75,14 @@ parse_event(Event) when is_record(Event, ami_event)  ->
 %% @doc посылает запрос в AMI и возвращает ответ
 request(Socket, Action, Data) ->
     ActionID = uuid:to_string(uuid:uuid1()),
+    IsAsync = proplists:get_value('Async', Data) =:= "true",
     gen_tcp:send(Socket, io_lib:format("Action: ~s\n", [Action])),
     gen_tcp:send(Socket, io_lib:format("ActionID: ~s\n", [ActionID])),
     lists:foreach(fun ({K, V}) ->
         gen_tcp:send(Socket, io_lib:format("~s: ~s\n", [K, V]))
     end, Data), 
     gen_tcp:send(Socket, "\n"),
-    ActionID.
+    {ActionID, IsAsync}.
 
 %% @spec request(Socket, Request) -> #ami_response
 %% @doc посылает запрос в AMI и возвращает ответ
