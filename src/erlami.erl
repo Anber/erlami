@@ -18,106 +18,51 @@
 -author("Anton Evzhakov <anber@anber.ru>").
 -license("Apache License 2.0").
 
--include("erlami.hrl").
-
--export([init/1, start_link/1]).
-
 -export( [
-    request/1, request/2, add_handler/2
+    start/0,
+    request/2,
+    originate/1,
+    add_handler/2,
+    add_handler/3,
+    remove_handler/1
 ]).
 
--record(state, {handlers = dict:new(), responses = dict:new()}).
+-include("erlami.hrl").
 
-start_link(ServerInfo) ->
-    {ok, spawn_link(?MODULE, init, [ServerInfo])}.
+start() -> start(erlami).
 
-init(ServerInfo) ->
-    AmiPID = self(),
-    register(ami, AmiPID),
-    {ok, _ClientPID} = erlami_client:start_link(ServerInfo, AmiPID),
-    receive
-        {connected, Socket} ->
-            loop(#state{}, Socket);
-        _ -> fail
-    end.
+start(App) ->
+    start_ok(App, application:start(App, permanent)).
 
-loop(State, Socket) ->
-    NewState = receive
-        Event = #ami_event{action_id = ActionID} when ActionID =/= undefined ->
-            State#state{
-                responses = case dict:is_key(ActionID, State#state.responses) of
-                    true ->
-                        {Pid, true} = dict:fetch(ActionID, State#state.responses),
-                        Pid ! Event,
-                        dict:erase(ActionID, State#state.responses);
-                    false ->
-                        lager:error(<<"Ответ на неизвестный запрос: ~p~n~p">>, [Event, dict:to_list(State#state.responses) ]),
-                        State#state.responses
-                end
-            };
-        Event = #ami_event{name = EventName} ->
-            State#state{
-                handlers = case dict:is_key(EventName, State#state.handlers) of
-                    true ->
-                        Fns = dict:fetch(EventName, State#state.handlers),
-                        Actualed = lists:filter(
-                            fun (F) ->
-                                case F(Event) of
-                                    continue -> true;
-                                    _ -> false
-                                end
-                            end,
-                            Fns
-                        ),
-                        dict:store(EventName, Actualed, State#state.handlers);
-                    false -> State#state.handlers
-                end
-            };
-        Response = #ami_response{uuid = ActionID} ->
-            State#state{
-                responses = case dict:is_key(ActionID, State#state.responses) of
-                    true ->
-                        {Pid, IsAsync} = dict:fetch(ActionID, State#state.responses),
-                        case IsAsync of
-                            true ->
-                                State#state.responses;
-                            false ->
-                                Pid ! Response,
-                                dict:erase(ActionID, State#state.responses)
-                        end;
-                    false ->
-                        lager:error(<<"Ответ на неизвестный запрос: ~p~n~p">>, [Response, dict:to_list(State#state.responses) ]),
-                        State#state.responses
-                end
-            };
-        { handler, add, EventName, F } ->
-            State#state{
-                handlers = dict:append(EventName, F, State#state.handlers)
-            };
-        { request, Req, PidToResponse } when is_record(Req, ami_request) ->
-            #ami_request{action = Action, data = Data} = Req,
-            {ActionID, IsAsync} = erlami_client:request(Socket, Action, Data),
-            State#state{responses = dict:store(ActionID, {PidToResponse, IsAsync}, State#state.responses)};
-        Msg ->
-            lager:error(<<"Unexpected message: ~p~n">>, [Msg]),
-            State
-    end,
-    loop(NewState, Socket).
+start_ok(_App, ok) -> ok;
+start_ok(_App, {error, {already_started, _App}}) -> ok;
+start_ok(App, {error, {not_started, Dep}}) ->
+    ok = start(Dep),
+    start(App);
+start_ok(App, {error, Reason}) ->
+    erlang:error({app_start_failed, App, Reason}).
 
-%% External API
-
-request(Request) when is_record(Request, ami_request) ->
-    ami ! {request, Request, self()},
-    receive
-        Response when is_record(Response, ami_response) -> Response;
-        Event when is_record(Event, ami_event) -> Event
-    end.
-
+-spec request(atom(), list({atom(), string()})) -> #ami_response{} | #ami_event{}.
 request(Action, Data) ->
-    request(#ami_request{action = Action, data = Data}).
+    gen_server:call(erlami_client, {request, Action, Data}). 
 
-%% @spec add_handler(EventName, Callback) -> ok
-%% @doc …
+-spec originate(list({atom(), string()})) -> #ami_event{}.
+originate(Data) ->
+    #ami_response{uuid = ActionID} = request("Originate", [{'Async', "true"} | Data]),
+    Handler = fun(#ami_event{name = 'OriginateResponse', action_id = EvActionID}) -> EvActionID =:= ActionID; (_) -> false end,
+    erlami_events:wait(Handler).
+
+-spec add_handler(atom(), fun((#ami_event{}) -> any())) -> reference()
+                ;(fun((#ami_event{}) -> boolean()), fun((#ami_event{}) -> any())) -> reference().
 add_handler(EventName, Callback) when is_atom(EventName), is_function(Callback, 1) ->
-    ami ! { handler, add, EventName, fun(Event) -> Callback(Event#ami_event.data) end },
-    ok.
+    Handler = fun(#ami_event{name = Name}) -> EventName =:= Name; (_) -> false end,
+    add_handler(Handler, Callback);
+add_handler(Handler, Callback) when is_function(Handler, 1), is_function(Callback, 1) ->
+    add_handler(Handler, Callback, permanent).
+
+add_handler(Handler, Callback, Type) when is_function(Handler, 1), is_function(Callback, 1) ->
+    erlami_events:add_handler(Handler, Callback, Type).
+
+-spec remove_handler(reference()) -> reference().
+remove_handler(Ref) when is_reference(Ref) ->
+    erlami_events:remove_handler(Ref).

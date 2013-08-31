@@ -25,15 +25,6 @@
 %% Supervisor callbacks
 -export([init/1]).
 
-%% Helper macro for declaring children of supervisor
--define(
-    CHILD(Name, Args),
-    {Name,
-        {Name, start_link, Args},
-        permanent, infinity, worker, [?MODULE]
-    }
-).
-
 %% ===================================================================
 %% API functions
 %% ===================================================================
@@ -44,6 +35,9 @@ start_link(ServerInfo) ->
 %% Supervisor callbacks
 %% ===================================================================
 init(ServerInfo) ->
-    Children = [?CHILD(erlami, [ServerInfo])],
+    Children = [
+        {erlami_evm, {erlami_evm, start_link, []}, permanent, infinity, worker, [?MODULE]},
+        {erlami_client, {erlami_client, start_link, [ServerInfo]}, permanent, infinity, worker, [?MODULE]}
+    ],
     {ok, { {one_for_one, 5, 10}, Children} }.
 

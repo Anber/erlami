@@ -17,25 +17,112 @@
 -author("Anton Evzhakov <anber@anber.ru>").
 -license("Apache License 2.0").
 
+-behaviour(gen_server).
+
+-export([start_link/1, loop/1]).
+-export([init/1, terminate/2, handle_call/3, handle_cast/2, handle_info/2, code_change/3]).
+
 -include_lib("kernel/include/inet.hrl").
 -include_lib("erlami.hrl").
 
-%% API
--export([start_link/2, request/3]).
+-record(state, {socket, pid}).
 
-%% callbacks
--export([init/2]).
+-spec start_link(list({atom(), any()})) -> {ok, pid()}.
+start_link(ServerInfo) ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, ServerInfo, []).
 
-%% ===================================================================
-%% API functions
-%% ===================================================================
-start_link(ServerInfo, AmiPID) ->
-    {ok, spawn_link(?MODULE, init, [ServerInfo, AmiPID])}.
+-spec init(list({atom(), any()})) -> {ok, #state{}}.
+init(ServerInfo) ->
+    % process_flag(trap_exit, true),
+
+    {host, Host} = lists:keyfind(host, 1, ServerInfo),
+    {port, Port} = lists:keyfind(port, 1, ServerInfo),
+    {ok, Socket} = gen_tcp:connect(Host, Port, [binary, {packet, line}]),
+
+    receive
+        { tcp, Socket, <<"Asterisk Call Manager/", _Version:3/binary, "\r\n">> } ->
+            {user, User} = lists:keyfind(user, 1, ServerInfo),
+            {password, Password} = lists:keyfind(password, 1, ServerInfo),
+            ok = auth(Socket, User, Password);
+        Msg ->
+            lager:error(<<"Unexpected message: ~p~n">>, [Msg]),
+            erlang:error(unexpected_message)
+    end,
+
+    Pid = spawn_link(?MODULE, loop, [Socket]), 
+    gen_tcp:controlling_process(Socket, Pid),
+    {ok, #state{socket = Socket, pid = Pid}}.
+
+-spec terminate(atom(), #state{}) -> ok.
+terminate(_, #state{socket = Socket}) ->
+    gen_tcp:close(Socket),
+    ok.
+
+handle_info(_Info, State) -> {noreply, State}.
+
+code_change(_OldVersion, State, _Extra) -> {ok, State}.
+
+-spec auth(gen_tcp:socket(), string(), string()) -> ok | fail.
+auth(Socket, User, Password) ->
+    Response = request(Socket, login, [{'Username', User}, {'Secret', Password}]),
+    case Response of
+        #ami_response{success = true} ->
+            ok;
+        #ami_response{message = Msg} ->
+            lager:error(<<"Ошибка авторизации в AMI: ~p~n">>, [Msg]),
+            fail
+    end.
+
+-spec request(gen_tcp:socket(), atom(), [{atom(), string()}]) -> #ami_response{}.
+request(Socket, Action, Data) ->
+    ActionID = uuid:to_string(uuid:uuid1()),
+    gen_tcp:send(Socket, io_lib:format("Action: ~s\n", [Action])),
+    gen_tcp:send(Socket, io_lib:format("ActionID: ~s\n", [ActionID])),
+    lists:foreach(fun ({K, V}) ->
+        gen_tcp:send(Socket, io_lib:format("~s: ~s\n", [K, V]))
+    end, Data), 
+    gen_tcp:send(Socket, "\n"),
+    get_response().
+
+loop(Socket) ->
+    receive
+        {request, Action, Data, {Pid, Ref}} ->
+            Response = request(Socket, Action, Data),
+            Pid ! {Ref, Response};
+        {tcp, _Socket, <<"Event: ", Name/binary>>} ->
+            EventName = binary_to_atom(erlami_helpers:trim(Name), utf8),
+            Event = parse_event(#ami_event{ name = EventName }),
+            erlami_evm:notify(Event); 
+        {tcp_closed, _Socket} ->
+            lager:error(<<"Потеряно соединение с Asterisk Manager Interface">>),
+            erlang:error(tcp_closed);
+        Msg ->
+            lager:error(<<"Unexpected message: ~p">>, [Msg])
+    after
+        5000 ->
+            request(Socket, ping, [])
+    end,
+    ?MODULE:loop(Socket).
+
+handle_cast(_Request, State) ->
+    {noreply, State}.
+
+handle_call({request, Action, Data}, _From, State = #state{pid = Pid}) ->
+    Ref = make_ref(),
+    Pid ! {request, Action, Data, {self(), Ref}},
+    Response = receive
+        {Ref, Resp} -> Resp
+    end,
+    {reply, Response, State}.
 
 parse_response(Response) when is_record(Response, ami_response)  ->
     receive
         { tcp, _Socket, <<"Message: ", Message/binary>> } ->
             parse_response(Response#ami_response{ message = erlami_helpers:trim(Message) });
+        { tcp, _Socket, <<"Ping: Pong\r\n">> } ->
+            parse_response(Response);
+        { tcp, _Socket, <<"Timestamp: ", Timestamp/binary>> } ->
+            parse_response(Response#ami_response{ timestamp = erlami_helpers:trim(Timestamp) });
         { tcp, _Socket, <<"ActionID: ", Uuid/binary>> } ->
             parse_response(Response#ami_response{ uuid = binary_to_list(erlami_helpers:trim(Uuid)) });
         { tcp, _Socket, <<"\r\n">> } ->
@@ -70,71 +157,3 @@ parse_event(Event) when is_record(Event, ami_event)  ->
             lager:error(<<"Unexpected message: ~p~n">>, [Msg]),
             fail
     end.
-
-%% @spec request(Socket, Action, Data) -> #ami_response
-%% @doc посылает запрос в AMI и возвращает ответ
-request(Socket, Action, Data) ->
-    ActionID = uuid:to_string(uuid:uuid1()),
-    IsAsync = proplists:get_value('Async', Data) =:= "true",
-    gen_tcp:send(Socket, io_lib:format("Action: ~s\n", [Action])),
-    gen_tcp:send(Socket, io_lib:format("ActionID: ~s\n", [ActionID])),
-    lists:foreach(fun ({K, V}) ->
-        gen_tcp:send(Socket, io_lib:format("~s: ~s\n", [K, V]))
-    end, Data), 
-    gen_tcp:send(Socket, "\n"),
-    {ActionID, IsAsync}.
-
-%% @spec request(Socket, Request) -> #ami_response
-%% @doc посылает запрос в AMI и возвращает ответ
-request(Socket, #ami_request{action = Action, data = Data}) ->
-    request(Socket, Action, Data).
-
-auth(Socket, User, Password) ->
-    request(Socket, login, [{'Username', User}, {'Secret', Password}]),
-    case get_response() of
-        Response when is_record(Response, ami_response), Response#ami_response.success == true ->
-            ok;
-        Response when is_record(Response, ami_response) ->
-            lager:error(<<"Ошибка авторизации в AMI: ~p~n">>, [Response#ami_response.message]),
-            fail
-    end.
-
-init(ServerInfo, AmiPID) ->
-    {host, Host} = lists:keyfind(host, 1, ServerInfo),
-    {port, Port} = lists:keyfind(port, 1, ServerInfo),
-    {user, User} = lists:keyfind(user, 1, ServerInfo),
-    {password, Password} = lists:keyfind(password, 1, ServerInfo),
-    % {logfile, Logfile} = lists:keyfind(logfile, 1, ServerInfo),
-
-    {ok, Socket} = gen_tcp:connect(Host, Port, [binary, {packet, line}]),
-
-    receive
-        { tcp, Socket, <<"Asterisk Call Manager/", _Version:3/binary, "\r\n">> } ->
-            AmiPID ! {connected, Socket},
-            auth(Socket, User, Password),
-            event_loop(Socket, AmiPID);
-        Msg ->
-            lager:error(<<"Unexpected message: ~p~n">>, [Msg]),
-            fail
-    end.
-    % case AuthResult of
-    %     ok ->
-    %     _ -> fail
-    % end.
-
-event_loop(Socket, AmiPID) ->
-    receive
-        { tcp, _Socket, <<"Event: ", Name/binary>> } ->
-            EventName = binary_to_atom(erlami_helpers:trim(Name), utf8),
-            Event = parse_event(#ami_event{ name = EventName }),
-            AmiPID ! Event;
-        { tcp, _Socket, <<"Response: ", "Success", "\r\n">> } ->
-            Response = parse_response(#ami_response{ success = true }),
-            AmiPID ! Response;
-        { tcp, _Socket, <<"Response: ", "Error", "\r\n">> } ->
-            Response = parse_response(#ami_response{ success = false }),
-            AmiPID ! Response;
-        Msg ->
-            lager:error(<<"Unexpected message: ~p~n">>, [Msg])
-    end,
-    event_loop(Socket, AmiPID).

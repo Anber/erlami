@@ -1,4 +1,4 @@
-%%% Erlami Application.
+%%% A AMI event manager.
 %%%
 %%% Copyright 2013 Anton Evzhakov <anber@anber.ru>
 %%%
@@ -13,26 +13,20 @@
 %%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %%% See the License for the specific language governing permissions and
 %%% limitations under the License.
--module(erlami_app).
+-module(erlami_evm).
 -author("Anton Evzhakov <anber@anber.ru>").
 -license("Apache License 2.0").
 
--behaviour(application).
+%% API
+-export([start_link/0, add_handler/1, notify/1]).
 
-%% Application callbacks
--export([start/0, start/2, stop/1]).
+start_link() ->
+    {ok, Pid} = gen_event:start_link({local, ?MODULE}),
+    gen_event:add_handler(?MODULE, erlami_events, []),
+    {ok, Pid}.
 
-%% ===================================================================
-%% Application callbacks
-%% ===================================================================
+add_handler(Module) ->
+    gen_event:add_handler(?MODULE, Module, []).
 
-start() ->
-    application:start(erlami).
-
-start(_StartType, _StartArgs) ->
-    {ok, ServerInfo} = application:get_env(server),
-    {ok, Pid} = erlami_sup:start_link(ServerInfo),
-    {ok, Pid, []}.
-
-stop(_State) ->
-    ok.
+notify(Event) ->
+    gen_event:notify(?MODULE, Event).

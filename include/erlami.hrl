@@ -9,6 +9,7 @@
     success,
     failure_type,
     uuid,
+    timestamp :: binary(),
     message = ""
 }).
 

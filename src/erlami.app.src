@@ -1,8 +1,9 @@
 {application, erlami, [
     {description, "Asterisk Manager Interface (AMI) client for erlang/otp"},
     {vsn, git},
+    {modules, [erlami, erlami_app, erlami_client, erlami_events, erlami_evm, erlami_helpers, erlami_sup]},
     {registered, []},
-    {applications, [kernel, stdlib, sasl]},
+    {applications, [kernel, stdlib, sasl, lager]},
     {mod, { erlami_app, []}},
     {env, []}
  ]}.
