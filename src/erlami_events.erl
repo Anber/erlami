@@ -1,4 +1,4 @@
-%%% Main erlami module.
+%%% Erlami events module.
 %%%
 %%% Copyright 2013 Anton Evzhakov <anber@anber.ru>
 %%%

@@ -33,7 +33,7 @@ start_link(ServerInfo) ->
 
 -spec init(list({atom(), any()})) -> {ok, #state{}}.
 init(ServerInfo) ->
-    % process_flag(trap_exit, true),
+    process_flag(trap_exit, true),
 
     {host, Host} = lists:keyfind(host, 1, ServerInfo),
     {port, Port} = lists:keyfind(port, 1, ServerInfo),
@@ -64,7 +64,11 @@ code_change(_OldVersion, State, _Extra) -> {ok, State}.
 
 -spec auth(gen_tcp:socket(), string(), string()) -> ok | fail.
 auth(Socket, User, Password) ->
-    Response = request(Socket, login, [{'Username', User}, {'Secret', Password}]),
+    LoginAction = #ami_action{
+        name = login,
+        fields = [{'Username', User}, {'Secret', Password}]
+    },
+    Response = request(Socket, LoginAction),
     case Response of
         #ami_response{success = true} ->
             ok;
@@ -73,21 +77,20 @@ auth(Socket, User, Password) ->
             fail
     end.
 
--spec request(gen_tcp:socket(), atom(), [{atom(), string()}]) -> #ami_response{}.
-request(Socket, Action, Data) ->
-    ActionID = uuid:to_string(uuid:uuid1()),
-    gen_tcp:send(Socket, io_lib:format("Action: ~s\n", [Action])),
+-spec request(gen_tcp:socket(), #ami_action{}) -> #ami_response{}.
+request(Socket, #ami_action{name = Name, id = ActionID, fields = Fields}) ->
+    gen_tcp:send(Socket, io_lib:format("Action: ~s\n", [Name])),
     gen_tcp:send(Socket, io_lib:format("ActionID: ~s\n", [ActionID])),
     lists:foreach(fun ({K, V}) ->
         gen_tcp:send(Socket, io_lib:format("~s: ~s\n", [K, V]))
-    end, Data), 
+    end, Fields), 
     gen_tcp:send(Socket, "\n"),
     get_response().
 
 loop(Socket) ->
     receive
-        {request, Action, Data, {Pid, Ref}} ->
-            Response = request(Socket, Action, Data),
+        {action, Action = #ami_action{}, {Pid, Ref}} ->
+            Response = request(Socket, Action),
             Pid ! {Ref, Response};
         {tcp, _Socket, <<"Event: ", Name/binary>>} ->
             EventName = binary_to_atom(erlami_helpers:trim(Name), utf8),
@@ -100,33 +103,35 @@ loop(Socket) ->
             lager:error(<<"Unexpected message: ~p">>, [Msg])
     after
         5000 ->
-            request(Socket, ping, [])
+            request(Socket, #ami_action{name = ping})
     end,
     ?MODULE:loop(Socket).
 
 handle_cast(_Request, State) ->
     {noreply, State}.
 
-handle_call({request, Action, Data}, _From, State = #state{pid = Pid}) ->
+handle_call({action, Action = #ami_action{}}, _From, State = #state{pid = Pid}) ->
     Ref = make_ref(),
-    Pid ! {request, Action, Data, {self(), Ref}},
+    Pid ! {action, Action, {self(), Ref}},
     Response = receive
         {Ref, Resp} -> Resp
     end,
     {reply, Response, State}.
 
-parse_response(Response) when is_record(Response, ami_response)  ->
+parse_response(Response = #ami_response{fields = Fields}) when is_record(Response, ami_response)  ->
     receive
         { tcp, _Socket, <<"Message: ", Message/binary>> } ->
             parse_response(Response#ami_response{ message = erlami_helpers:trim(Message) });
-        { tcp, _Socket, <<"Ping: Pong\r\n">> } ->
-            parse_response(Response);
-        { tcp, _Socket, <<"Timestamp: ", Timestamp/binary>> } ->
-            parse_response(Response#ami_response{ timestamp = erlami_helpers:trim(Timestamp) });
         { tcp, _Socket, <<"ActionID: ", Uuid/binary>> } ->
-            parse_response(Response#ami_response{ uuid = binary_to_list(erlami_helpers:trim(Uuid)) });
+            parse_response(Response#ami_response{ action_id = binary_to_list(erlami_helpers:trim(Uuid)) });
         { tcp, _Socket, <<"\r\n">> } ->
             Response;
+        { tcp, _Socket, Msg } when is_binary(Msg) ->
+            TrimmedMsg = erlami_helpers:trim(Msg),
+            [Key, Value] = binary:split(TrimmedMsg, <<": ">>),
+            Field = {binary_to_atom(Key, utf8), Value},
+            % lager:warning(<<"Unknown field in response: ~p">>, [TrimmedMsg]),
+            parse_response(Response#ami_response{ fields = [Field | Fields] });
         Msg ->
             #ami_response{ success = false, message = io_lib:format(<<"Unexpected message ~p">>, [Msg]) }
     end.
@@ -141,18 +146,70 @@ get_response() ->
             #ami_response{ success = false, message = io_lib:format(<<"Unexpected message ~p">>, [Msg]) }
     end.
 
+parse_event_field(Event = #ami_event{}, {<<"ActionID">>, ActionID}) ->
+    Event#ami_event{ action_id = binary_to_list(ActionID) };
+parse_event_field(Event = #ami_event{}, {<<"Privilege">>, Privileges}) ->
+    Event#ami_event{ privilege = [binary_to_atom(B, utf8) || B <- binary:split(Privileges, <<",">>)]};
+parse_event_field(Event = #ami_event{}, {<<"Response">>, <<"Success">>}) ->
+    Event#ami_event{ response = success };
+parse_event_field(Event = #ami_event{}, {<<"Response">>, <<"Failure">>}) ->
+    Event#ami_event{ response = failure };
+parse_event_field(Event = #ami_event{}, {<<"Message">>, Message}) ->
+    Event#ami_event{ message = Message };
 
-parse_event(Event) when is_record(Event, ami_event)  ->
+parse_event_field(Event = #ami_event{channels = []}, {<<"Channel">>, Name}) ->
+    Channel = #ami_ev_channel{name = Name},
+    Event#ami_event{ channels = [Channel] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"Uniqueid">>, <<"<null>">>}) ->
+    ModChan = Channel#ami_ev_channel{uniqueid = undefined},
+    Event#ami_event{ channels = [ModChan] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"Uniqueid">>, Value}) ->
+    ModChan = Channel#ami_ev_channel{uniqueid = binary_to_list(Value)},
+    Event#ami_event{ channels = [ModChan] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"ChannelState">>, Value}) ->
+    ModChan = Channel#ami_ev_channel{channel_state = list_to_integer(binary_to_list(Value))},
+    Event#ami_event{ channels = [ModChan] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"ChannelStateDesc">>, Value}) ->
+    ModChan = Channel#ami_ev_channel{channel_state_desc = binary_to_list(Value)},
+    Event#ami_event{ channels = [ModChan] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"CallerIDNum">>, Value}) ->
+    ModChan = Channel#ami_ev_channel{caller_id_num = binary_to_list(Value)},
+    Event#ami_event{ channels = [ModChan] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"CallerIDName">>, Value}) ->
+    ModChan = Channel#ami_ev_channel{caller_id_name = binary_to_list(Value)},
+    Event#ami_event{ channels = [ModChan] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"ConnectedLineNum">>, Value}) ->
+    ModChan = Channel#ami_ev_channel{connected_line_num = binary_to_list(Value)},
+    Event#ami_event{ channels = [ModChan] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"ConnectedLineName">>, Value}) ->
+    ModChan = Channel#ami_ev_channel{connected_line_name = binary_to_list(Value)},
+    Event#ami_event{ channels = [ModChan] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"AccountCode">>, Value}) ->
+    ModChan = Channel#ami_ev_channel{account_code = binary_to_list(Value)},
+    Event#ami_event{ channels = [ModChan] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"Context">>, Value}) ->
+    ModChan = Channel#ami_ev_channel{context = binary_to_list(Value)},
+    Event#ami_event{ channels = [ModChan] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"Exten">>, Value}) ->
+    ModChan = Channel#ami_ev_channel{exten = binary_to_list(Value)},
+    Event#ami_event{ channels = [ModChan] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"Priority">>, Value}) ->
+    ModChan = Channel#ami_ev_channel{priority = binary_to_list(Value)},
+    Event#ami_event{ channels = [ModChan] };
+
+parse_event_field(Event = #ami_event{fields = Fields}, {Key, Value}) ->
+    Field = {binary_to_atom(Key, utf8), Value},
+    % lager:warning(<<"Unknown field in event: ~p">>, [Field]),
+    Event#ami_event{ fields = [Field | Fields] }.
+
+parse_event(Event = #ami_event{}) ->
     receive
-        { tcp, _Socket, <<"Privilege: ", Privileges/binary>> } ->
-            parse_event(Event#ami_event{ privilege = binary:split(erlami_helpers:trim(Privileges), <<",">>) });
-        { tcp, _Socket, <<"ActionID: ", ActionID/binary>> } ->
-            parse_event(Event#ami_event{ action_id = binary_to_list(erlami_helpers:trim(ActionID)) });
         { tcp, _Socket, <<"\r\n">> } ->
             Event;
         { tcp, _Socket, Msg } when is_binary(Msg) ->
-            [Key, Value] = binary:split(erlami_helpers:trim(Msg), <<": ">>),
-            parse_event(Event#ami_event{ data = [{Key, Value} | Event#ami_event.data] });
+            TrimmedMsg = erlami_helpers:trim(Msg),
+            [Key, Value] = binary:split(TrimmedMsg, <<": ">>),
+            parse_event(parse_event_field(Event, {Key, Value}));
         Msg ->
             lager:error(<<"Unexpected message: ~p~n">>, [Msg]),
             fail

@@ -20,8 +20,8 @@
 
 -export( [
     start/0,
-    request/2,
-    originate/1,
+    action/1,
+    originate/3,
     add_handler/2,
     add_handler/3,
     remove_handler/1
@@ -42,15 +42,13 @@ start_ok(App, {error, {not_started, Dep}}) ->
 start_ok(App, {error, Reason}) ->
     erlang:error({app_start_failed, App, Reason}).
 
--spec request(atom(), list({atom(), string()})) -> #ami_response{} | #ami_event{}.
-request(Action, Data) ->
-    gen_server:call(erlami_client, {request, Action, Data}). 
+-spec action(#ami_action{}) -> #ami_response{} | #ami_event{}.
+action(Action = #ami_action{}) ->
+    gen_server:call(erlami_client, {action, Action}). 
 
--spec originate(list({atom(), string()})) -> #ami_event{}.
-originate(Data) ->
-    #ami_response{uuid = ActionID} = request("Originate", [{'Async', "true"} | Data]),
-    Handler = fun(#ami_event{name = 'OriginateResponse', action_id = EvActionID}) -> EvActionID =:= ActionID; (_) -> false end,
-    erlami_events:wait(Handler).
+-spec originate(string(), any(), any()) -> #ami_event{}.
+originate(From, To, Options) ->
+    erlami_action_originate:do(From, To, Options).
 
 -spec add_handler(atom(), fun((#ami_event{}) -> any())) -> reference()
                 ;(fun((#ami_event{}) -> boolean()), fun((#ami_event{}) -> any())) -> reference().
@@ -60,6 +58,7 @@ add_handler(EventName, Callback) when is_atom(EventName), is_function(Callback, 
 add_handler(Handler, Callback) when is_function(Handler, 1), is_function(Callback, 1) ->
     add_handler(Handler, Callback, permanent).
 
+-spec add_handler(fun((#ami_event{}) -> boolean()), fun((#ami_event{}) -> any()), 'permanent' | 'transient') -> reference().
 add_handler(Handler, Callback, Type) when is_function(Handler, 1), is_function(Callback, 1) ->
     erlami_events:add_handler(Handler, Callback, Type).
 

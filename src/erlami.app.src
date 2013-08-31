@@ -5,5 +5,13 @@
     {registered, []},
     {applications, [kernel, stdlib, sasl, lager]},
     {mod, { erlami_app, []}},
-    {env, []}
+    {env, [
+        {server, [
+            {host, "192.168.1.127"},
+            {port, 5038},
+            {user, "anber"},
+            {password, "2112"},
+            {logfile, "/var/tmp/ami.log"}
+        ]}
+    ]}
  ]}.
