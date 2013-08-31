@@ -79,12 +79,15 @@ auth(Socket, User, Password) ->
 
 -spec request(gen_tcp:socket(), #ami_action{}) -> #ami_response{}.
 request(Socket, #ami_action{name = Name, id = ActionID, fields = Fields}) ->
-    gen_tcp:send(Socket, io_lib:format("Action: ~s\n", [Name])),
-    gen_tcp:send(Socket, io_lib:format("ActionID: ~s\n", [ActionID])),
-    lists:foreach(fun ({K, V}) ->
-        gen_tcp:send(Socket, io_lib:format("~s: ~s\n", [K, V]))
-    end, Fields), 
-    gen_tcp:send(Socket, "\n"),
+    Cmd = lists:flatten([
+        io_lib:format("Action: ~s\n", [Name]),
+        io_lib:format("ActionID: ~s\n", [ActionID]),
+        lists:map(fun ({K, V}) ->
+            io_lib:format("~s: ~s\n", [K, V])
+        end, Fields), 
+        "\n"
+    ]),
+    gen_tcp:send(Socket, Cmd), 
     get_response().
 
 loop(Socket) ->
@@ -133,6 +136,7 @@ parse_response(Response = #ami_response{fields = Fields}) when is_record(Respons
             % lager:warning(<<"Unknown field in response: ~p">>, [TrimmedMsg]),
             parse_response(Response#ami_response{ fields = [Field | Fields] });
         Msg ->
+            lager:error(<<"Unexpected message: ~p">>, [Msg]),
             #ami_response{ success = false, message = io_lib:format(<<"Unexpected message ~p">>, [Msg]) }
     end.
 
@@ -143,6 +147,7 @@ get_response() ->
         { tcp, _Socket, <<"Response: ", "Error", "\r\n">> } ->
             parse_response(#ami_response{ success = false });
         Msg ->
+            lager:error(<<"Unexpected message: ~p">>, [Msg]),
             #ami_response{ success = false, message = io_lib:format(<<"Unexpected message ~p">>, [Msg]) }
     end.
 
