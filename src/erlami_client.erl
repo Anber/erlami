@@ -60,7 +60,7 @@ terminate(_, #state{socket = Socket}) ->
     gen_tcp:close(Socket),
     ok.
 
-handle_info({'EXIT', FromPID, {tcp_closed, _}}, #state{server_info = ServerInfo, pid = FromPID}) ->
+handle_info({'EXIT', FromPID, tcp_closed}, #state{server_info = ServerInfo, pid = FromPID}) ->
     {ok, State} = connect(ServerInfo),
     lager:info(<<"Соединение с Asterisk Manager Interface восстановлено">>),
     {noreply, State};
@@ -107,7 +107,7 @@ loop(Socket) ->
             erlami_evm:notify(Event); 
         {tcp_closed, _Socket} ->
             lager:warning(<<"Потеряно соединение с Asterisk Manager Interface">>),
-            erlang:error(tcp_closed);
+            erlang:exit(tcp_closed);
         Msg ->
             lager:error(<<"Unexpected message: ~p">>, [Msg])
     after
