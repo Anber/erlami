@@ -39,7 +39,12 @@ init(ServerInfo) ->
 connect(ServerInfo) ->
     {host, Host} = lists:keyfind(host, 1, ServerInfo),
     {port, Port} = lists:keyfind(port, 1, ServerInfo),
-    {ok, Socket} = gen_tcp:connect(Host, Port, [binary, {packet, line}]),
+    Socket = case gen_tcp:connect(Host, Port, [binary, {packet, line}]) of
+        {ok, S} -> S;
+        {error, Reason} ->
+            lager:error("Can't connect to ~s:~b: ~s.", [Host, Port, inet:format_error(Reason)]),
+            erlang:error(Reason, [{host, Host}, {port, Port}])  
+    end,
 
     receive
         { tcp, Socket, <<"Asterisk Call Manager/", _Version:3/binary, "\r\n">> } ->
