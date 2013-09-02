@@ -142,6 +142,11 @@ parse_response(Response = #ami_response{fields = Fields}) when is_record(Respons
 
 get_response() ->
     receive
+        {tcp, _Socket, <<"Event: ", Name/binary>>} ->
+            EventName = binary_to_atom(erlami_helpers:trim(Name), utf8),
+            Event = parse_event(#ami_event{ name = EventName }),
+            erlami_evm:notify(Event),
+            get_response();
         { tcp, _Socket, <<"Response: ", "Success", "\r\n">> } ->
             parse_response(#ami_response{ success = true });
         { tcp, _Socket, <<"Response: ", "Error", "\r\n">> } ->
