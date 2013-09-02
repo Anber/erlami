@@ -25,7 +25,7 @@
 -include_lib("kernel/include/inet.hrl").
 -include_lib("erlami.hrl").
 
--record(state, {socket, pid}).
+-record(state, {server_info, socket, pid}).
 
 -spec start_link(list({atom(), any()})) -> {ok, pid()}.
 start_link(ServerInfo) ->
@@ -34,7 +34,9 @@ start_link(ServerInfo) ->
 -spec init(list({atom(), any()})) -> {ok, #state{}}.
 init(ServerInfo) ->
     process_flag(trap_exit, true),
+    connect(ServerInfo).
 
+connect(ServerInfo) ->
     {host, Host} = lists:keyfind(host, 1, ServerInfo),
     {port, Port} = lists:keyfind(port, 1, ServerInfo),
     {ok, Socket} = gen_tcp:connect(Host, Port, [binary, {packet, line}]),
@@ -51,13 +53,17 @@ init(ServerInfo) ->
 
     Pid = spawn_link(?MODULE, loop, [Socket]), 
     gen_tcp:controlling_process(Socket, Pid),
-    {ok, #state{socket = Socket, pid = Pid}}.
+    {ok, #state{server_info = ServerInfo, socket = Socket, pid = Pid}}.
 
 -spec terminate(atom(), #state{}) -> ok.
 terminate(_, #state{socket = Socket}) ->
     gen_tcp:close(Socket),
     ok.
 
+handle_info({'EXIT', FromPID, {tcp_closed, _}}, #state{server_info = ServerInfo, pid = FromPID}) ->
+    {ok, State} = connect(ServerInfo),
+    lager:info(<<"Соединение с Asterisk Manager Interface восстановлено">>),
+    {noreply, State};
 handle_info(_Info, State) -> {noreply, State}.
 
 code_change(_OldVersion, State, _Extra) -> {ok, State}.
@@ -100,7 +106,7 @@ loop(Socket) ->
             Event = parse_event(#ami_event{ name = EventName }),
             erlami_evm:notify(Event); 
         {tcp_closed, _Socket} ->
-            lager:error(<<"Потеряно соединение с Asterisk Manager Interface">>),
+            lager:warning(<<"Потеряно соединение с Asterisk Manager Interface">>),
             erlang:error(tcp_closed);
         Msg ->
             lager:error(<<"Unexpected message: ~p">>, [Msg])
