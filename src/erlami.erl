@@ -24,6 +24,7 @@
     originate/3,
     add_handler/2,
     add_handler/3,
+    add_handler/4,
     remove_handler/1
 ]).
 
@@ -62,6 +63,14 @@ add_handler(Handler, Callback) when is_function(Handler, 1), is_function(Callbac
 add_handler(Handler, Callback, Type) when is_function(Handler, 1), is_function(Callback, 1) ->
     erlami_events:add_handler(Handler, Callback, Type).
 
--spec remove_handler(reference()) -> reference().
+-spec add_handler(list(), fun((#ami_event{}) -> boolean()), fun((#ami_event{}) -> any()), 'permanent' | 'transient') -> reference().
+add_handler(Name, Handler, Callback, Type) when is_list(Name), is_function(Handler, 1), is_function(Callback, 1) ->
+    erlami_events:add_handler(Name, Handler, Callback, Type).
+
+-spec remove_handler(list()) -> reference()
+                   ;(reference()) -> reference().
+remove_handler(Name) when is_list(Name) ->
+    erlami_events:remove_handler(Name);
+
 remove_handler(Ref) when is_reference(Ref) ->
     erlami_events:remove_handler(Ref).
