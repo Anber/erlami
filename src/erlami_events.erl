@@ -66,7 +66,7 @@ handle_call(_Request, Waiters) ->
     Reply = ok,
     {ok, Reply, Waiters}.
 
-handle_event(Event = #ami_event{}, State = #state{handlers = Handlers}) ->
+handle_event(Event = #ami_event{}, State = #state{handlers = Handlers, named_refs = Refs}) ->
     F = fun({Ref, Handler, Callback, Type}) -> 
         case catch Handler(Event) of
             true ->
@@ -79,13 +79,17 @@ handle_event(Event = #ami_event{}, State = #state{handlers = Handlers}) ->
                 case Type =:= permanent of
                     true -> true;
                     false ->
-                        gen_event:call(erlami_evm, ?MODULE, {remove_handler, Ref}),
                         false
                 end;
             _ -> true
         end
     end,
-    {ok, State#state{handlers = lists:filter(F, Handlers)}};
+    NewHandlers = lists:filter(F, Handlers),
+    Removed = Handlers -- NewHandlers,
+    NewRefs = lists:filter(fun({Name, Ref}) ->
+        lists:keyfind(Ref, 1, Removed) =:= false 
+    end, Refs),
+    {ok, State#state{handlers = NewHandlers, named_refs = NewRefs}};
 
 handle_event(_Event, State) ->
     {ok, State}.
