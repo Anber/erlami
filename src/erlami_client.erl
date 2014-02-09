@@ -187,6 +187,12 @@ parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"Uniqueid">>, <<"
 parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"Uniqueid">>, Value}) ->
     ModChan = Channel#ami_ev_channel{uniqueid = binary_to_list(Value)},
     Event#ami_event{ channels = [ModChan] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"UniqueID">>, <<"<null>">>}) ->
+    ModChan = Channel#ami_ev_channel{uniqueid = undefined},
+    Event#ami_event{ channels = [ModChan] };
+parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"UniqueID">>, Value}) ->
+    ModChan = Channel#ami_ev_channel{uniqueid = binary_to_list(Value)},
+    Event#ami_event{ channels = [ModChan] };
 parse_event_field(Event = #ami_event{channels = [Channel]}, {<<"ChannelState">>, Value}) ->
     ModChan = Channel#ami_ev_channel{channel_state = list_to_integer(binary_to_list(Value))},
     Event#ami_event{ channels = [ModChan] };

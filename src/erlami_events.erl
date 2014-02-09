@@ -86,7 +86,7 @@ handle_event(Event = #ami_event{}, State = #state{handlers = Handlers, named_ref
     end,
     NewHandlers = lists:filter(F, Handlers),
     Removed = Handlers -- NewHandlers,
-    NewRefs = lists:filter(fun({Name, Ref}) ->
+    NewRefs = lists:filter(fun({_, Ref}) ->
         lists:keyfind(Ref, 1, Removed) =:= false 
     end, Refs),
     {ok, State#state{handlers = NewHandlers, named_refs = NewRefs}};
