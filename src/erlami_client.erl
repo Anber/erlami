@@ -51,6 +51,10 @@ connect(ServerInfo) ->
             {user, User} = lists:keyfind(user, 1, ServerInfo),
             {password, Password} = lists:keyfind(password, 1, ServerInfo),
             ok = auth(Socket, User, Password);
+        { tcp, Socket, <<"Asterisk Call Manager/", _Version:5/binary, "\r\n">> } ->
+            {user, User} = lists:keyfind(user, 1, ServerInfo),
+            {password, Password} = lists:keyfind(password, 1, ServerInfo),
+            ok = auth(Socket, User, Password);
         Msg ->
             lager:error(<<"Unexpected message: ~p~n">>, [Msg]),
             erlang:error(unexpected_message)
