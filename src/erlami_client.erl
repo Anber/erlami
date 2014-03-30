@@ -138,6 +138,9 @@ handle_call({action, Action = #ami_action{}}, _From, State = #state{pid = Pid}) 
 
 parse_response(Response = #ami_response{fields = Fields}) when is_record(Response, ami_response)  ->
     receive
+        { action, Action = #ami_action{}, {Pid, Ref}} ->
+            self() ! { action, Action, {Pid, Ref}},
+            parse_response(Response);
         { tcp, _Socket, <<"Message: ", Message/binary>> } ->
             parse_response(Response#ami_response{ message = erlami_helpers:trim(Message) });
         { tcp, _Socket, <<"ActionID: ", Uuid/binary>> } ->
@@ -158,8 +161,8 @@ parse_response(Response = #ami_response{fields = Fields}) when is_record(Respons
 get_response() ->
     receive
         { action, Action = #ami_action{}, {Pid, Ref}} ->
-            Response = request(Socket, Action),
-            Pid ! {Ref, Response};
+            self() ! { action, Action, {Pid, Ref}},
+            get_response();
         {tcp, _Socket, <<"Event: ", Name/binary>>} ->
             EventName = binary_to_atom(erlami_helpers:trim(Name), utf8),
             Event = parse_event(#ami_event{ name = EventName }),
@@ -239,8 +242,8 @@ parse_event_field(Event = #ami_event{fields = Fields}, {Key, Value}) ->
 parse_event(Event = #ami_event{}) ->
     receive
         { action, Action = #ami_action{}, {Pid, Ref}} ->
-            Response = request(Socket, Action),
-            Pid ! {Ref, Response};
+            self() ! { action, Action, {Pid, Ref}},
+            parse_event(Event);
         { tcp, _Socket, <<"\r\n">> } ->
             Event;
         { tcp, _Socket, Msg } when is_binary(Msg) ->
